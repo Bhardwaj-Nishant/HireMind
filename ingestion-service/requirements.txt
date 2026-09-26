@@ -1,0 +1,11 @@
+firecrawl-py>=2.0
+pydantic>=2.0
+sqlalchemy>=2.0
+psycopg2-binary>=2.9
+google-api-python-client>=2.100
+google-auth-oauthlib>=1.2
+google-auth-httplib2>=0.2
+
+# LinkedIn ingestion (unofficial, unmaintained since Nov 2024 — see
+# shared/ingestion/sources/linkedin.py module docstring for caveats)
+linkedin-api>=2.3.1

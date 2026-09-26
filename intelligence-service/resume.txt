@@ -1,0 +1,54 @@
+Nishant Bhardwaj
+Delhi, India
++91-7982512360 | bhardwajnishant138@gmail.com | linkedin.com/in/n1shantbhardwaj | github.com/Bhardwaj-Nishant
+Professional Summary
+Computer Science undergraduate specializing in backend engineering and full-stack development. Experienced in building
+scalable, production-oriented applications with Java, Spring Boot, React, and Python. Skilled in REST/GraphQL API
+design, authentication systems, LLM/GenAI integration, containerization, and cloud-based data stores.
+Experience
+StaxTech
+Full Stack Developer Intern (Software Development Engineer)
+Remote
+Jul 2025– Aug 2025
+• Developed scalable backend services using Java, Spring Boot, Spring MVC, and Spring Data JPA, following SOLID
+design principles.
+• Designed and optimized REST APIs, improving database query performance and response reliability.
+• Collaborated in Agile sprints, participated in code reviews, and delivered features on schedule.
+Technical Skills
+Languages & Frameworks: Java, Python, JavaScript, Spring Boot, React.js, FastAPI, GraphQL
+Databases: MySQL, MongoDB, Supabase
+DevOps & Tools: Docker, Git, GitHub, CI/CD, Postman, IntelliJ IDEA, VS Code
+Concepts: REST APIs, JWT, OAuth2, MVC, SOLID, OOP, DSA, LLM/GenAI Integration
+Projects
+HireMind– AI-Powered Job Application Automation Agent (In Progress)
+• Building an LLM-powered agent that aggregates job listings from multiple Job Portals, generating tailored resumes
+and cover letters per listing via the Claude API.
+• Designing a human-in-the-loop workflow: AI-drafted recruiter emails and matched listings are surfaced for
+review/approval rather than auto-sent, ensuring controlled automation.
+• Tech Stack: FastAPI, Docker, Claude API (LLM), Python, CI/CD, Gmail/LinkedIn API integration
+AlgoNest– AI-Powered Coding Analytics Platform
+• Built a full-stack analytics platform aggregating and normalizing coding activity across 5 platforms (LeetCode,
+Codeforces, CodeChef, GeeksforGeeks, GitHub) into a unified schema with 20+ data fields via async Python scraping.
+• Engineered platform-specific analytics including a weighted coding-score algorithm, rating-bucketed difficulty
+categorization, and streak computation from contribution heatmaps.
+• Developed secure REST/GraphQL APIs with Google OAuth login, scheduled synchronization, layered DTO-based
+architecture, and global exception handling.
+• Tech Stack: React, Spring Boot, Spring Security, PostgreSQL, GraphQL, Python (FastAPI), JWT, OAuth2,
+Supabase
+DivyaTulsi– AI-Powered Telemedicine Application (Winner, RIT Hackathon 2025)
+• Developed a cross-platform healthcare application with AI-powered symptom analysis using the Gemini API and
+secure JWT-based authentication.
+• Tech Stack: React Native, Spring Boot, MySQL, JWT, Expo, Gemini API
+Education
+Roorkee Institute of Technology
+Bachelor of Technology in Computer Science and Engineering
+Roorkee, India
+2023– 2027
+• CGPA: 8.91/10 — Relevant Coursework: DSA, OOP, DBMS, Operating Systems, Computer Networks
+Achievements
+• Solved 600+ Data Structures & Algorithms problems across LeetCode and GeeksforGeeks, building strong
+problem-solving and optimization skills applicable to backend system design.
+• 2-time Hackathon Winner — RIT Hackathon 2025 (DivyaTulsi) and GFG Hackathon — recognized for delivering
+functional, demo-ready applications under tight timelines.
+• Earned Oracle Cloud Infrastructure (OCI) Certification, demonstrating working knowledge of cloud compute, storage,
+and deployment services.

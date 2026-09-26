@@ -1,0 +1,18 @@
+fastapi>=0.110
+uvicorn[standard]>=0.29
+sqlalchemy>=2.0
+psycopg2-binary>=2.9
+pydantic>=2.0
+
+# needed transitively: /matches/refresh calls shared.ingestion (Firecrawl, LinkedIn)
+firecrawl-py>=2.0
+linkedin-api>=2.3.1
+
+# needed transitively: /matches/{id}/generate calls shared.generation -> shared.llm
+anthropic>=0.40
+groq>=0.11
+
+# needed transitively: /drafts/{id}/push-to-gmail calls shared.gmail
+google-api-python-client>=2.100
+google-auth-oauthlib>=1.2
+google-auth-httplib2>=0.2

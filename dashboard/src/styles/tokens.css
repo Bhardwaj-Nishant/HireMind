@@ -1,0 +1,97 @@
+/* ==========================================================================
+   Design tokens — Vercel Geist system (per DESIGN.md)
+   Achromatic surface, blue-only accent, shadow-as-border, 4px spacing base.
+   ========================================================================== */
+:root {
+  /* Color — core surfaces */
+  --bg: #fafafa;
+  --bg-elevated: #ffffff;
+  --bg-recessed: #f2f2f2;
+  --bg-hover: #ebebeb;
+
+  /* Color — text */
+  --text-primary: #171717;
+  --text-secondary: #4d4d4d;
+  --text-muted: #8f8f8f;
+
+  /* Color — accent */
+  --accent: #0072f5;
+  --accent-focus: #005fcc;
+
+  /* Color — status dots only, never large fills */
+  --status-green: #45a557;
+  --status-orange: #ff990a;
+  --status-red: #e5484d;
+  --status-blue: #0062d1;
+  --status-gray: #8f8f8f;
+
+  /* Shadow-as-border */
+  --shadow-border: 0 0 0 1px rgba(0, 0, 0, 0.08);
+  --shadow-border-hover: 0 0 0 1px rgba(0, 0, 0, 0.14);
+  --shadow-small: var(--shadow-border), 0 2px 2px rgba(0, 0, 0, 0.04);
+  --shadow-medium: var(--shadow-border), 0 2px 2px rgba(0, 0, 0, 0.04),
+    0 8px 8px -8px rgba(0, 0, 0, 0.04);
+  --shadow-large: var(--shadow-border), 0 2px 2px rgba(0, 0, 0, 0.04),
+    0 8px 16px -4px rgba(0, 0, 0, 0.04);
+  --focus-ring: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent);
+
+  /* Radius */
+  --radius-default: 6px;
+  --radius-card: 12px;
+  --radius-pill: 9999px;
+
+  /* Spacing — 4px base */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-16: 64px;
+
+  /* Layout */
+  --page-width: 1200px;
+  --page-margin: 24px;
+  --header-height: 64px;
+
+  /* Type */
+  --font-sans: "Geist Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial,
+    sans-serif;
+  --font-mono: "Geist Mono", ui-monospace, SFMono-Regular, "Roboto Mono", monospace;
+
+  /* Motion */
+  --ease-swift: cubic-bezier(0.175, 0.885, 0.32, 1.1);
+}
+
+/* Dark variant — same achromatic-with-blue-accent system, inverted surfaces.
+   Applied via [data-theme="dark"] on <html>, toggled in Header.jsx and
+   persisted to localStorage in App.jsx. */
+[data-theme="dark"] {
+  --bg: #0a0a0a;
+  --bg-elevated: #141414;
+  --bg-recessed: #1f1f1f;
+  --bg-hover: #292929;
+
+  --text-primary: #ededed;
+  --text-secondary: #a1a1a1;
+  --text-muted: #6e6e6e;
+
+  --accent: #3391ff;
+  --accent-focus: #5ca7ff;
+
+  --status-green: #4cc264;
+  --status-orange: #ffa726;
+  --status-red: #f16269;
+  --status-blue: #3391ff;
+  --status-gray: #6e6e6e;
+
+  --shadow-border: 0 0 0 1px rgba(255, 255, 255, 0.12);
+  --shadow-border-hover: 0 0 0 1px rgba(255, 255, 255, 0.2);
+  --shadow-small: var(--shadow-border), 0 2px 2px rgba(0, 0, 0, 0.2);
+  --shadow-medium: var(--shadow-border), 0 2px 2px rgba(0, 0, 0, 0.2),
+    0 8px 8px -8px rgba(0, 0, 0, 0.2);
+  --shadow-large: var(--shadow-border), 0 2px 2px rgba(0, 0, 0, 0.2),
+    0 8px 16px -4px rgba(0, 0, 0, 0.3);
+  --focus-ring: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent);
+}

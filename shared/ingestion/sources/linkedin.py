@@ -1,179 +1,560 @@
 """
-LinkedIn ingestion via the unofficial `linkedin-api` package (Voyager
-API wrapper), NOT Firecrawl — session-cookie authenticated, matching the
-earlier decision to avoid both official API restrictions and browser-
-automation scraping.
+LinkedIn ingestion via `linkedin_scraper` (joeyism/linkedin_scraper), an
+actively maintained (v3.1.2, April 2026) Playwright-based library — NOT
+Firecrawl, and NOT the old tomquirk `linkedin-api` wire-API library.
 
-HONEST CAVEATS, please read before relying on this:
-  - `linkedin-api` (PyPI) is effectively unmaintained: no release since
-    November 2024, and its published GitHub source/docs URLs currently
-    return 404. LinkedIn's internal Voyager API can change without
-    notice, and this library has had no chance to adapt if it has. It
-    may simply stop working at any time — that's a real risk, not a
-    hypothetical one.
-  - This uses YOUR personal LinkedIn account's session cookies. Session
-    cookies expire (days to weeks) and need re-extracting from a browser
-    when they do. Automated use of a personal account for this purpose
-    also violates LinkedIn's Terms of Service — the risk of account
-    restriction is real, which is exactly why requests are capped at
-    roughly once per hour (see min_interval_hours below).
-  - Field availability (posted date, location format, etc.) from
-    search_jobs()/get_job() is whatever this specific library version
-    happens to expose — expect to see debug output on first real use and
-    adjust extraction the same way we did for Internshala/Unstop.
+HONEST TRADEOFFS, please read before relying on this:
+  - This drives a real (headless) browser via Playwright, not lightweight
+    HTTP calls — heavier, slower, and needs the `playwright install
+    chromium` browser binary installed on whatever machine runs it
+    (including gateway-service's host, if you use the dashboard's
+    "Fetch more matches" for LinkedIn).
+  - Requires a one-time interactive login: run
+    `python scripts/linkedin_setup.py` from ingestion-service/ once, log
+    into LinkedIn by hand in the browser window it opens, and it saves a
+    reusable session file. This script never sees or stores your
+    password.
+  - Still your real personal account, still against LinkedIn's Terms of
+    Service, still real account-restriction risk — which is why the same
+    ~1 request/hour gate from before is kept here (persisted in the
+    `credentials` table, checked before every fetch_all() call).
+  - The exact fields available on the library's `Job` model aren't fully
+    confirmed from where I could verify its docs — the first real run
+    logs the raw attributes of one result so field-name mismatches can
+    be fixed against real data rather than guessed again.
+  - `search()`'s exact keyword-argument surface for filtering (e.g. an
+    experience-level or remote-only parameter) isn't confirmed either,
+    so work_type is approximated by appending "Intern" to the search
+    keywords rather than risking a TypeError from a guessed parameter
+    name — cruder, but won't crash if wrong.
 
-Setup (one-time):
-  1. Log into linkedin.com in your browser.
-  2. Open DevTools -> Application (Chrome) or Storage (Firefox) -> Cookies
-     -> https://www.linkedin.com
-  3. Copy the values of the `li_at` and `JSESSIONID` cookies.
-  4. Set env vars LINKEDIN_LI_AT and LINKEDIN_JSESSIONID for the first
-     run — they're then stored in the `credentials` table (platform=
-     'linkedin') and reused automatically after that, same pattern as
-     Gmail OAuth tokens.
-
-Rate limiting: a `last_fetch_at` timestamp is persisted in the same
-credentials row. Every fetch_all() call checks it first and refuses to
-run again before min_interval_hours has passed (default 1.0), unless
-force=True. This is enforced per ENTIRE cycle (search + detail calls),
-not per individual request, which is the practical way to keep to "about
-once an hour" for the whole account.
+Setup:
+    pip install linkedin-scraper playwright
+    playwright install chromium
+    python scripts/linkedin_setup.py   (one-time, from ingestion-service/)
 """
-import os
-import time
-from datetime import datetime, timezone
 
-from linkedin_api import Linkedin
-from requests.cookies import RequestsCookieJar
+import asyncio
+import os
+import re
+from datetime import datetime, timezone
 
 from shared.db.models import Credential
 from shared.db.session import get_session
 from shared.ingestion.common import derive_search_keywords, matches_location_mode
 
+
 DEFAULT_KEYWORD = "Software Development"
-PHRASE_EXAMPLES = '"Backend Developer", "Full Stack Developer", "Python Developer", "Software Engineer Intern"'
 
-MIN_INTERVAL_HOURS = float(os.environ.get("LINKEDIN_MIN_INTERVAL_HOURS", "1"))
-REQUEST_DELAY_SECONDS = float(os.environ.get("LINKEDIN_REQUEST_DELAY", "2"))
+PHRASE_EXAMPLES = (
+    '"Backend Developer", "Full Stack Developer", '
+    '"Python Developer", "Software Engineer"'
+)
 
-_client_cache: Linkedin | None = None
+MIN_INTERVAL_HOURS = float(
+    os.environ.get("LINKEDIN_MIN_INTERVAL_HOURS", "1")
+)
+
+REQUEST_DELAY_SECONDS = float(
+    os.environ.get("LINKEDIN_REQUEST_DELAY", "2")
+)
+
+SESSION_PATH = os.environ.get(
+    "LINKEDIN_SESSION_PATH",
+    os.path.join(
+        os.path.dirname(__file__),
+        "..",
+        "..",
+        "..",
+        "ingestion-service",
+        "linkedin_session.json",
+    ),
+)
 
 
 class RateLimitedError(RuntimeError):
     """Raised when fetch_all() is called before min_interval_hours has
-    elapsed since the last successful run, and force=False."""
+    elapsed since the last successful run, and force=False.
+    """
 
 
-def _load_credential() -> dict | None:
-    """Returns the credential_data dict (not the ORM object — the session
-    closes before this returns, so returning the object itself would raise
-    DetachedInstanceError on any later attribute access)."""
+def _load_last_fetch_at() -> str | None:
     with get_session() as session:
-        row = session.query(Credential).filter_by(platform="linkedin").one_or_none()
-        return dict(row.credential_data) if row else None
+        row = (
+            session.query(Credential)
+            .filter_by(platform="linkedin")
+            .one_or_none()
+        )
 
-
-def _store_credential(li_at: str, jsessionid: str, last_fetch_at: str | None = None) -> None:
-    with get_session() as session:
-        row = session.query(Credential).filter_by(platform="linkedin").one_or_none()
-        data = {"li_at": li_at, "jsessionid": jsessionid}
-        if last_fetch_at is not None:
-            data["last_fetch_at"] = last_fetch_at
-        elif row and row.credential_data.get("last_fetch_at"):
-            data["last_fetch_at"] = row.credential_data["last_fetch_at"]
-
-        if row:
-            row.credential_data = data
-        else:
-            row = Credential(platform="linkedin", auth_type="session_cookie", credential_data=data)
-            session.add(row)
+        return row.credential_data.get("last_fetch_at") if row else None
 
 
 def _update_last_fetch_at() -> None:
     with get_session() as session:
-        row = session.query(Credential).filter_by(platform="linkedin").one_or_none()
+        row = (
+            session.query(Credential)
+            .filter_by(platform="linkedin")
+            .one_or_none()
+        )
+
+        now = datetime.now(timezone.utc).isoformat()
+
         if row:
             data = dict(row.credential_data)
-            data["last_fetch_at"] = datetime.now(timezone.utc).isoformat()
+            data["last_fetch_at"] = now
             row.credential_data = data
 
+        else:
+            row = Credential(
+                platform="linkedin",
+                auth_type="session_file",
+                credential_data={
+                    "last_fetch_at": now
+                },
+            )
 
-def _check_rate_limit(min_interval_hours: float, force: bool) -> None:
+            session.add(row)
+
+
+def _check_rate_limit(
+    min_interval_hours: float,
+    force: bool,
+) -> None:
+
     if force:
         return
-    credential_data = _load_credential()
-    last_fetch_at = credential_data.get("last_fetch_at") if credential_data else None
+
+    last_fetch_at = _load_last_fetch_at()
+
     if not last_fetch_at:
         return
 
-    elapsed_hours = (datetime.now(timezone.utc) - datetime.fromisoformat(last_fetch_at)).total_seconds() / 3600
+    elapsed_hours = (
+        datetime.now(timezone.utc)
+        - datetime.fromisoformat(last_fetch_at)
+    ).total_seconds() / 3600
+
     if elapsed_hours < min_interval_hours:
-        wait_minutes = round((min_interval_hours - elapsed_hours) * 60)
+
+        wait_minutes = round(
+            (min_interval_hours - elapsed_hours) * 60
+        )
+
         raise RateLimitedError(
-            f"LinkedIn was fetched {elapsed_hours:.1f}h ago; waiting for min_interval_hours="
-            f"{min_interval_hours}. Try again in about {wait_minutes} min, or pass force=True."
+            f"LinkedIn was fetched {elapsed_hours:.1f}h ago; "
+            f"waiting for min_interval_hours={min_interval_hours}. "
+            f"Try again in about {wait_minutes} min, "
+            f"or pass force=True."
         )
 
 
-def get_client() -> Linkedin:
-    """Builds (and caches) a Linkedin API client from session cookies.
-    Env vars take priority when set (so you can refresh expired/invalid
-    cookies just by re-setting LINKEDIN_LI_AT / LINKEDIN_JSESSIONID and
-    re-running — otherwise, once cookies were stored once, new env vars
-    would be silently ignored). Falls back to whatever's already stored
-    in the credentials table when the env vars aren't set."""
-    global _client_cache
-    if _client_cache is not None:
-        return _client_cache
+def _describe_job_object(job) -> str:
+    """Debug helper: shows what a raw result object actually looks like.
 
-    env_li_at = os.environ.get("LINKEDIN_LI_AT")
-    env_jsessionid = os.environ.get("LINKEDIN_JSESSIONID")
+    Handles:
+      - plain strings
+      - dictionaries
+      - Pydantic-model-like objects
+    """
 
-    if env_li_at and env_jsessionid:
-        li_at, jsessionid = env_li_at, env_jsessionid
-        _store_credential(li_at, jsessionid)
-    else:
-        credential_data = _load_credential()
-        if not credential_data:
-            raise FileNotFoundError(
-                "No LinkedIn session cookies found. Set LINKEDIN_LI_AT and LINKEDIN_JSESSIONID "
-                "(extracted from your browser's DevTools -> Application -> Cookies -> "
-                "linkedin.com) for the first run — see module docstring for exact steps."
+    if isinstance(job, str):
+        return f"plain string, repr: {job!r}"
+
+    if isinstance(job, dict):
+        return (
+            f"dict with keys: {list(job.keys())} "
+            f"— sample: {job}"
+        )
+
+    attrs = [
+        a for a in dir(job)
+        if not a.startswith("_")
+    ]
+
+    sample = {}
+
+    for a in attrs:
+
+        try:
+            val = getattr(job, a)
+
+            if not callable(val):
+                sample[a] = val
+
+        except Exception:
+            continue
+
+    return (
+        f"object of type {type(job).__name__} "
+        f"with attributes: {list(sample.keys())} "
+        f"— sample: {sample}"
+    )
+
+
+def _resolve_url(raw) -> str | None:
+    """
+    Resolve a LinkedIn URL from a search result.
+
+    Handles:
+
+    1. Normal URL:
+       https://www.linkedin.com/jobs/view/123/
+
+    2. Markdown URL:
+       [https://www.linkedin.com/jobs/view/123/](https://www.linkedin.com/jobs/view/123/)
+
+    3. Plain job ID:
+       123
+
+    4. Object/dict containing linkedin_url or url.
+    """
+
+    if isinstance(raw, str):
+
+        # ---------------------------------------------------------
+        # Markdown URL
+        #
+        # Example:
+        # [https://www.linkedin.com/jobs/view/123/](https://www.linkedin.com/jobs/view/123/)
+        # ---------------------------------------------------------
+
+        markdown_match = re.search(
+            r"\]\((https?://www\.linkedin\.com/jobs/view/\d+/?)\)",
+            raw,
+        )
+
+        if markdown_match:
+            return markdown_match.group(1)
+
+        # ---------------------------------------------------------
+        # Normal URL
+        # ---------------------------------------------------------
+
+        if raw.startswith("http"):
+            return raw
+
+        # ---------------------------------------------------------
+        # Plain LinkedIn job ID
+        # ---------------------------------------------------------
+
+        if raw.isdigit():
+            return (
+                f"https://www.linkedin.com/jobs/view/"
+                f"{raw}/"
             )
-        li_at = credential_data.get("li_at")
-        jsessionid = credential_data.get("jsessionid")
 
-    jar = RequestsCookieJar()
-    jar.set("li_at", li_at, domain=".linkedin.com", path="/")
-    jsessionid_value = jsessionid if jsessionid.startswith('"') else f'"{jsessionid}"'
-    jar.set("JSESSIONID", jsessionid_value, domain=".linkedin.com", path="/")
+    # -------------------------------------------------------------
+    # Dictionary result
+    # -------------------------------------------------------------
 
-    try:
-        _client_cache = Linkedin("", "", cookies=jar, authenticate=False)
-    except TypeError:
-        # Some fork/versions of this library don't accept authenticate= —
-        # fall back to the constructor without it.
-        _client_cache = Linkedin("", "", cookies=jar)
+    if isinstance(raw, dict):
 
-    return _client_cache
+        return (
+            raw.get("linkedin_url")
+            or raw.get("url")
+        )
 
+    # -------------------------------------------------------------
+    # Object result
+    # -------------------------------------------------------------
 
-def _job_id_from_result(result: dict) -> str | None:
-    """search_jobs() results identify the job via a URN like
-    'urn:li:jobPosting:1234567890' under varying key names depending on
-    library version — check the common ones."""
-    urn = result.get("trackingUrn") or result.get("entityUrn") or result.get("dashEntityUrn")
-    if not urn:
-        return None
-    return str(urn).split(":")[-1]
+    return (
+        getattr(raw, "linkedin_url", None)
+        or getattr(raw, "url", None)
+    )
 
 
-def _epoch_ms_is_recent(epoch_ms: int | None, max_days: int) -> bool:
-    if not epoch_ms:
-        return False
-    posted = datetime.fromtimestamp(epoch_ms / 1000, tz=timezone.utc)
-    age_days = (datetime.now(timezone.utc) - posted).total_seconds() / 86400
-    return 0 <= age_days <= max_days
+def _get(obj, field_names):
+    """
+    Safely get the first non-empty field from either a dictionary
+    or an object.
+    """
+
+    for name in field_names:
+
+        if isinstance(obj, dict):
+            val = obj.get(name)
+
+        else:
+            val = getattr(obj, name, None)
+
+        if val and not callable(val):
+            return val
+
+    return None
+
+
+async def _search_jobs_async(
+    keywords_list: list[str],
+    max_jobs: int,
+    max_detail_fetches: int,
+) -> list[dict]:
+
+    """
+    Runs the actual Playwright-driven search + a bounded number
+    of detail fetches.
+
+    Returns plain dictionaries instead of the library's Pydantic
+    objects.
+    """
+
+    from linkedin_scraper import (
+        BrowserManager,
+        JobScraper,
+        JobSearchScraper,
+    )
+
+    # -------------------------------------------------------------
+    # Verify LinkedIn session
+    # -------------------------------------------------------------
+
+    if not os.path.exists(SESSION_PATH):
+
+        raise FileNotFoundError(
+            f"No LinkedIn session found at {SESSION_PATH}. "
+            f"Run `python scripts/linkedin_setup.py` "
+            f"from ingestion-service/ once to log in and create it."
+        )
+
+    results = []
+
+    # -------------------------------------------------------------
+    # Start browser
+    # -------------------------------------------------------------
+
+    async with BrowserManager(headless=True) as browser:
+
+        await browser.load_session(SESSION_PATH)
+
+        search_scraper = JobSearchScraper(browser.page)
+
+        # ---------------------------------------------------------
+        # Search jobs
+        # ---------------------------------------------------------
+
+        raw_jobs = []
+
+        for kw in keywords_list:
+
+            if len(raw_jobs) >= max_jobs:
+                break
+
+            try:
+
+                jobs = await search_scraper.search(
+                    keywords=kw,
+                    limit=max_jobs,
+                )
+
+            except Exception as exc:
+
+                print(
+                    f"[linkedin] search failed for keyword "
+                    f"'{kw}': {exc}"
+                )
+
+                continue
+
+            print(
+                f"[linkedin] search '{kw}' "
+                f"returned {len(jobs)} results"
+            )
+
+            raw_jobs.extend(jobs)
+
+            await asyncio.sleep(
+                REQUEST_DELAY_SECONDS
+            )
+
+        # ---------------------------------------------------------
+        # Debug first search result
+        # ---------------------------------------------------------
+
+        if raw_jobs:
+
+            print(
+                "[linkedin] DEBUG first search result: "
+                f"{_describe_job_object(raw_jobs[0])}"
+            )
+
+        # ---------------------------------------------------------
+        # Detail scraper
+        # ---------------------------------------------------------
+
+        detail_scraper = JobScraper(browser.page)
+
+        detail_debug_printed = False
+
+        # ---------------------------------------------------------
+        # Fetch job details
+        # ---------------------------------------------------------
+
+        for raw in raw_jobs[:max_detail_fetches]:
+
+            job_url = _resolve_url(raw)
+
+            if not job_url:
+
+                print(
+                    "[linkedin] couldn't derive a URL from "
+                    f"search result: {raw!r}"
+                )
+
+                continue
+
+            try:
+
+                detail = await detail_scraper.scrape(
+                    job_url
+                )
+
+            except Exception as exc:
+
+                print(
+                    f"[linkedin] failed to fetch details "
+                    f"for {job_url}: {exc}"
+                )
+
+                continue
+
+            # -----------------------------------------------------
+            # Debug raw Job object
+            # -----------------------------------------------------
+
+            if not detail_debug_printed:
+
+                print(
+                    "[linkedin] DEBUG first detail result: "
+                    f"{_describe_job_object(detail)}"
+                )
+
+                detail_debug_printed = True
+
+            # -----------------------------------------------------
+            # Extract normal fields
+            # -----------------------------------------------------
+
+            title = _get(
+                detail,
+                [
+                    "title",
+                    "job_title",
+                    "name",
+                ],
+            )
+
+            company = _get(
+                detail,
+                [
+                    "company",
+                    "company_name",
+                    "companyName",
+                ],
+            )
+
+            location = _get(
+                detail,
+                [
+                    "location",
+                    "job_location",
+                ],
+            )
+
+            description = _get(
+                detail,
+                [
+                    "description",
+                    "job_description",
+                ],
+            )
+
+            # -----------------------------------------------------
+            # IMPORTANT:
+            #
+            # linkedin_scraper currently returns:
+            #
+            # job_title=None
+            #
+            # but the browser page title contains:
+            #
+            # Software Engineering Intern |
+            # Abstrabit Technologies | LinkedIn
+            #
+            # Therefore use page.title() as a fallback.
+            # -----------------------------------------------------
+
+            if not title:
+
+                print(
+                    "[linkedin] JobScraper did not extract title"
+                )
+
+                try:
+
+                    page_title = await browser.page.title()
+
+                    print(
+                        f"[linkedin] PAGE TITLE: {page_title}"
+                    )
+
+                    if page_title:
+
+                        parts = [
+                            part.strip()
+                            for part in page_title.split("|")
+                        ]
+
+                        if parts:
+
+                            candidate_title = parts[0]
+
+                            if candidate_title:
+                                title = candidate_title
+
+                except Exception as exc:
+
+                    print(
+                        "[linkedin] failed to extract title "
+                        f"from page title: {exc}"
+                    )
+
+            # -----------------------------------------------------
+            # Optional debug
+            # -----------------------------------------------------
+
+            if not title:
+
+                print(
+                    "[linkedin] WARNING: title is still missing "
+                    f"for {job_url}"
+                )
+
+            print(
+                "[linkedin] extracted: "
+                f"title={title!r}, "
+                f"company={company!r}, "
+                f"location={location!r}"
+            )
+
+            # -----------------------------------------------------
+            # Store normalized result
+            # -----------------------------------------------------
+
+            results.append(
+                {
+                    "url": job_url,
+                    "title": title,
+                    "company": company,
+                    "location": location,
+                    "description": description,
+                }
+            )
+
+            await asyncio.sleep(
+                REQUEST_DELAY_SECONDS
+            )
+
+    return results
 
 
 def fetch_all(
@@ -184,136 +565,204 @@ def fetch_all(
     max_age_days: int = 1,
     ignore_recency: bool = False,
     force: bool = False,
-    max_detail_fetches: int = 2,
+    max_detail_fetches: int = 5,
 ) -> list[dict]:
-    """Full fetch cycle. Same parameter meanings as internshala.fetch_all,
-    plus:
 
-    force: bypass the min-interval-hours rate gate (debugging only —
-        avoid using this routinely, it exists specifically to protect
-        the LinkedIn account this session belongs to).
-    max_detail_fetches: how many search results to fetch full details
-        (description) for via an extra get_job() call each. Kept small
-        by default to minimize request count per hourly cycle — the
-        rest are included with whatever summary fields search_jobs()
-        already returned, no extra request per posting.
     """
-    if work_type not in ("internship", "job"):
-        raise ValueError("work_type must be 'internship' or 'job'")
-    if location_mode not in ("remote", "onsite", "any"):
-        raise ValueError("location_mode must be 'remote', 'onsite', or 'any'")
+    Full LinkedIn fetch cycle.
 
-    _check_rate_limit(MIN_INTERVAL_HOURS, force)
+    Parameters:
+        max_jobs:
+            Maximum number of search results requested.
 
-    client = get_client()
-    search_keywords = keywords or derive_search_keywords(
-        "LinkedIn", PHRASE_EXAMPLES, DEFAULT_KEYWORD, keyword_style="phrase"
+        work_type:
+            Either "internship" or "job".
+
+        location_mode:
+            "remote", "onsite", or "any".
+
+        keywords:
+            Optional custom LinkedIn search keywords.
+
+        max_age_days:
+            Kept for compatibility with other ingestion sources.
+
+        ignore_recency:
+            Kept for compatibility with other ingestion sources.
+
+        force:
+            Bypass the hourly LinkedIn rate gate.
+
+        max_detail_fetches:
+            Maximum number of individual job pages to open.
+
+    Note:
+        LinkedIn's search results through this library don't
+        reliably expose a posted date, so postings are included
+        when recency cannot be verified rather than dropped.
+    """
+
+    # -------------------------------------------------------------
+    # Validate parameters
+    # -------------------------------------------------------------
+
+    if work_type not in (
+        "internship",
+        "job",
+    ):
+
+        raise ValueError(
+            "work_type must be 'internship' or 'job'"
+        )
+
+    if location_mode not in (
+        "remote",
+        "onsite",
+        "any",
+    ):
+
+        raise ValueError(
+            "location_mode must be 'remote', 'onsite', or 'any'"
+        )
+
+    # -------------------------------------------------------------
+    # Rate limit
+    # -------------------------------------------------------------
+
+    _check_rate_limit(
+        MIN_INTERVAL_HOURS,
+        force,
     )
 
-    experience = ["1"] if work_type == "internship" else None  # '1' = Internship, per library's known codes
-    remote_filter = None
-    if location_mode == "remote":
-        remote_filter = ["2"]  # '2' = Remote
-    elif location_mode == "onsite":
-        remote_filter = ["1"]  # '1' = On-site
+    # -------------------------------------------------------------
+    # Derive search keywords
+    # -------------------------------------------------------------
 
-    raw_results = []
-    for kw in search_keywords:
-        if len(raw_results) >= max_jobs:
-            break
-        try:
-            search_kwargs = {"keywords": kw, "limit": max_jobs}
-            if experience:
-                search_kwargs["experience"] = experience
-            if remote_filter:
-                search_kwargs["remote"] = remote_filter
-            results = client.search_jobs(**search_kwargs)
-        except Exception as exc:  # noqa: BLE001 — one bad keyword shouldn't kill the whole run
-            hint = ""
-            if "Expecting value" in str(exc) or "JSONDecodeError" in type(exc).__name__:
-                hint = (
-                    " — this usually means LinkedIn returned something that isn't JSON (an "
-                    "expired/invalid session cookie, a login redirect, or a verification "
-                    "challenge page) rather than real search results. Try logging into "
-                    "linkedin.com fresh in your browser, re-extracting li_at and JSESSIONID, "
-                    "and re-running with LINKEDIN_LI_AT / LINKEDIN_JSESSIONID set again — that "
-                    "overwrites the stored cookies."
-                )
-            print(f"[linkedin] search failed for keyword '{kw}': {exc}{hint}")
-            continue
+    search_keywords = keywords or derive_search_keywords(
+        "LinkedIn",
+        PHRASE_EXAMPLES,
+        DEFAULT_KEYWORD,
+        keyword_style="phrase",
+    )
 
-        print(f"[linkedin] search '{kw}' returned {len(results)} results")
-        raw_results.extend(results)
-        time.sleep(REQUEST_DELAY_SECONDS)
+    # -------------------------------------------------------------
+    # Convert job search into internship search
+    # -------------------------------------------------------------
+
+    if work_type == "internship":
+
+        search_keywords = [
+            f"{kw} Intern"
+            for kw in search_keywords
+        ]
+
+    # -------------------------------------------------------------
+    # Run async scraper
+    # -------------------------------------------------------------
+
+    try:
+
+        raw_results = asyncio.run(
+            _search_jobs_async(
+                search_keywords,
+                max_jobs,
+                max_detail_fetches,
+            )
+        )
+
+    except FileNotFoundError:
+
+        raise
+
+    except Exception as exc:
+
+        raise RuntimeError(
+            f"LinkedIn scraping failed: {exc}"
+        ) from exc
+
+    # -------------------------------------------------------------
+    # Normalize results
+    # -------------------------------------------------------------
 
     payloads = []
-    skipped_stale = 0
+
     skipped_location = 0
-    detail_fetches_used = 0
+    skipped_missing_fields = 0
 
-    for result in raw_results[:max_jobs]:
-        job_id = _job_id_from_result(result)
-        if not job_id:
-            print(f"[linkedin] couldn't extract a job id from search result, skipping: {list(result.keys())}")
+    for result in raw_results:
+
+        # ---------------------------------------------------------
+        # Require URL and title
+        # ---------------------------------------------------------
+
+        if (
+            not result.get("url")
+            or not result.get("title")
+        ):
+
+            skipped_missing_fields += 1
+
+            print(
+                "[linkedin] skipping result with "
+                f"missing url/title: {result}"
+            )
+
             continue
 
-        title = (result.get("title") or {}).get("text") if isinstance(result.get("title"), dict) else result.get("title")
-        company = None
-        location = result.get("formattedLocation") or result.get("location")
-        listed_at = result.get("listedAt")
-        description = None
+        # ---------------------------------------------------------
+        # Location filtering
+        # ---------------------------------------------------------
 
-        if detail_fetches_used < max_detail_fetches:
-            try:
-                detail = client.get_job(job_id)
-                detail_fetches_used += 1
-                description = detail.get("description", {}).get("text") if isinstance(detail.get("description"), dict) else detail.get("description")
-                company = (
-                    detail.get("companyDetails", {})
-                    .get("com.linkedin.voyager.deco.jobs.web.shared.WebCompactJobPostingCompany", {})
-                    .get("companyResolutionResult", {})
-                    .get("name")
-                )
-                listed_at = listed_at or detail.get("listedAt")
-                time.sleep(REQUEST_DELAY_SECONDS)
-            except Exception as exc:  # noqa: BLE001 — fall back to search-result summary fields
-                print(f"[linkedin] failed to fetch details for job {job_id}: {exc}")
+        if not matches_location_mode(
+            result.get("location"),
+            location_mode,
+        ):
 
-        if not title:
-            print(f"[linkedin] skipping job {job_id} — no title in result")
-            continue
-
-        recent_enough = ignore_recency or (
-            _epoch_ms_is_recent(listed_at, max_age_days) if listed_at else True  # unknown -> can't verify, include
-        )
-        if not recent_enough:
-            skipped_stale += 1
-            continue
-        if not matches_location_mode(location, location_mode):
             skipped_location += 1
+
             continue
+
+        # ---------------------------------------------------------
+        # Build ingestion payload
+        # ---------------------------------------------------------
 
         payloads.append(
             {
-                "url": f"https://www.linkedin.com/jobs/view/{job_id}/",
+                "url": result["url"],
                 "markdown": None,
                 "extracted": {
-                    "title": title,
-                    "company": company or "Unknown (LinkedIn didn't expose company name for this result)",
-                    "location": location,
-                    "description": description,
+                    "title": result["title"],
+                    "company": (
+                        result.get("company")
+                        or "Unknown"
+                    ),
+                    "location": result.get(
+                        "location"
+                    ),
+                    "description": result.get(
+                        "description"
+                    ),
                     "stipend_or_salary": None,
-                    "posted_date": None,  # already filtered via listed_at above; not re-parsed from text
-                    "recruiter_email": None,  # LinkedIn postings don't expose this
+                    "posted_date": None,
+                    "recruiter_email": None,
                 },
             }
         )
 
+    # -------------------------------------------------------------
+    # Update rate-limit timestamp
+    # -------------------------------------------------------------
+
     _update_last_fetch_at()
 
+    # -------------------------------------------------------------
+    # Final stats
+    # -------------------------------------------------------------
+
     print(
-        f"[linkedin] kept {len(payloads)}, skipped {skipped_stale} stale "
-        f"(older than {max_age_days}d) and {skipped_location} location-mismatched "
-        f"({detail_fetches_used} detail fetches used)"
+        f"[linkedin] kept {len(payloads)}, "
+        f"skipped {skipped_location} location-mismatched, "
+        f"{skipped_missing_fields} missing url/title"
     )
+
     return payloads

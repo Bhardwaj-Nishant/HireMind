@@ -6,6 +6,7 @@ google-api-python-client>=2.100
 google-auth-oauthlib>=1.2
 google-auth-httplib2>=0.2
 
-# LinkedIn ingestion (unofficial, unmaintained since Nov 2024 — see
-# shared/ingestion/sources/linkedin.py module docstring for caveats)
-linkedin-api>=2.3.1
+# LinkedIn ingestion (Playwright-based, actively maintained fork — see
+# shared/ingestion/sources/linkedin.py module docstring for setup + caveats)
+linkedin-scraper>=3.1.2
+playwright>=1.62.0

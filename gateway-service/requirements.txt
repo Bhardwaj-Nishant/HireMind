@@ -6,7 +6,8 @@ pydantic>=2.0
 
 # needed transitively: /matches/refresh calls shared.ingestion (Firecrawl, LinkedIn)
 firecrawl-py>=2.0
-linkedin-api>=2.3.1
+linkedin-scraper>=3.1.2
+playwright>=1.62.0
 
 # needed transitively: /matches/{id}/generate calls shared.generation -> shared.llm
 anthropic>=0.40

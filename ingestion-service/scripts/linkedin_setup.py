@@ -40,7 +40,17 @@ async def main():
         # attribute doesn't exist under this exact name, the error here
         # will show what's actually available so we can fix it together.
         await browser.save_session(SESSION_PATH)
+
+        # The file holds live login cookies (including li_at), so treat it
+        # like a password: owner-only permissions, and never commit it.
+        # It is listed in .gitignore; this is a second line of defence.
+        try:
+            os.chmod(SESSION_PATH, 0o600)
+        except OSError:
+            pass  # e.g. Windows, where POSIX modes don't apply
+
         print(f"Session saved to {SESSION_PATH}. You can now run LinkedIn scraping headlessly.")
+        print("This file contains your LinkedIn login cookies. Do NOT commit or share it.")
 
 
 if __name__ == "__main__":

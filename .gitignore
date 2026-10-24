@@ -18,6 +18,12 @@ node_modules/
 client_secrets.json
 **/client_secrets.json
 
+# LinkedIn browser session (contains live login cookies, never commit)
+linkedin_session.json
+**/linkedin_session.json
+*_session.json
+storage_state.json
+
 # Build output
 dist/
 build/
